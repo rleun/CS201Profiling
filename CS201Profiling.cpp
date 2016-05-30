@@ -27,8 +27,8 @@ public:
 
 typedef std::map<const BasicBlock*, std::vector<const BasicBlock*>, compare> set;
 typedef std::map<const BasicBlock*, GlobalVariable*, compare> eM;
-typedef std::map<int, BasicBlock*> ibM;
 typedef	std::map<const BasicBlock*, GlobalVariable*, compare> bbM;
+typedef std::map<std::pair<const BasicBlock*, const BasicBlock*>, std::vector<const BasicBlock*>> lM;
 
 
 namespace {
@@ -52,14 +52,17 @@ namespace {
 		LLVMContext *Context;
 		bbM bbMap;
 		eM edgeMap;
-		ibM intMap;
 		GlobalVariable *bbCounter = nullptr;
 		GlobalVariable *prevIndex = NULL;
 		ConstantInt *BBNum = nullptr;
 	
 
+		// Output predecessors
+		set PredSet, AllDomSets;
+		std::vector<std::pair<const BasicBlock*, const BasicBlock*>> BackEdges;
+		std::vector<std::vector<const BasicBlock*>> LoopSet;
 
-
+		lM LoopMap;
     	GlobalVariable *BasicBlockPrintfFormatStr = NULL;
 		Function *printf_func = NULL;
 		CS201Profiling() : FunctionPass(ID) {}
@@ -131,6 +134,7 @@ namespace {
 			errs() << "Function: " << F.getName() << '\n';
 			
 			
+
 			// Output predecessors
 			set PredSet, AllDomSets;
 			std::vector<std::pair<const BasicBlock*, const BasicBlock*>> BackEdges;
@@ -145,7 +149,7 @@ namespace {
 			for(auto &BB: F) {
 				// Add the footer to Main's BB containing the return 0; statement BEFORE calling runOnBasicBlock
 				if(F.getName().equals("main") && isa<ReturnInst>(BB.getTerminator())) { // major hack?
-					addFinalPrintf(BB, Context, bbMap, edgeMap, bbCounter, BasicBlockPrintfFormatStr, printf_func);
+					addFinalPrintf(BB, Context, bbMap, edgeMap, BasicBlockPrintfFormatStr, printf_func);
 				}
 
 					runOnBasicBlock(BB);
@@ -166,81 +170,117 @@ namespace {
 
 			int cBBNum = std::stoi(BB.getName());
 			
-			prevIndex->print(errs()); errs() << '\n';
+			//prevIndex->print(errs()); errs() << '\n';
 			Value* loadAddr1 = IRB2.CreateLoad(prevIndex);
-			loadAddr1->print(errs()); errs() << '\n';
+			//loadAddr1->print(errs()); errs() << '\n';
 			Value *Args[] = { IRB2.getInt32(0), loadAddr1};
 			Value* v = IRB2.CreateInBoundsGEP(edgeMap[&BB], Args, "edges");
-			v->print(errs()); errs() << '\n';
+			//v->print(errs()); errs() << '\n';
 
 			LoadInst *l = IRB2.CreateLoad(v);
-			l->print(errs()); errs() << '\n';
+			//l->print(errs()); errs() << '\n';
 		 	Value* addAddr1 = IRB2.CreateAdd(ConstantInt::get(Type::getInt32Ty(*Context), 1), l);
-		 	addAddr1->print(errs()); errs() << '\n';
-		 	StoreInst *s = IRB2.CreateStore(addAddr1, v);
-		 	s->print(errs()); errs() << '\n';
+		 	//addAddr1->print(errs()); errs() << '\n';
+		 	IRB2.CreateStore(addAddr1, v);
+		 	//s->print(errs()); errs() << '\n';
 
 
-		 	StoreInst *s1 = IRB2.CreateStore(ConstantInt::get(Type::getInt32Ty(*Context), cBBNum), prevIndex);
-		 	s1->print(errs()); errs() << '\n';
+		 	IRB2.CreateStore(ConstantInt::get(Type::getInt32Ty(*Context), cBBNum), prevIndex);
+		 	//s1->print(errs()); errs() << '\n';
 		
 
 			return true;
 		}
 
 
-		void addFinalPrintf(BasicBlock& BB, LLVMContext *Context, bbM &bbMap,  eM &edgeMap, GlobalVariable *bbCounter, GlobalVariable *var,  Function *printf_func) {
+		void addFinalPrintf(BasicBlock& BB, LLVMContext *Context, bbM &bbMap,  eM &edgeMap, GlobalVariable *var,  Function *printf_func) {
 			IRBuilder<> builder(BB.getTerminator()); // Insert BEFORE the final statement
 			std::vector<Constant*> indices;
 			Constant *zero = Constant::getNullValue(IntegerType::getInt32Ty(*Context));
 			indices.push_back(zero);
 			indices.push_back(zero);
-			Constant *var_ref = ConstantExpr::getGetElementPtr(var, indices);
-	
+			
+			std::string title = "BASIC BLOCK PROFILING:\n";
+			errs() << BB.getParent()->getName() << '\n';
 			for(bbM::iterator i = bbMap.begin(); i != bbMap.end(); ++i) {
 
 				Value *bbc = builder.CreateLoad(i->second);
-				bbc->setName(i->first->getName());
-				std::string s = i->first->getName();
+				std::string curr = i->first->getName();
+				std::string s = "b" + curr;
 				s.append(": %d\n");
-				const char *finalPrintString = s.c_str();
+				title.append(s);
+				const char *finalPrintString = title.c_str();
 	    		Constant *format_const = ConstantDataArray::getString(*Context, finalPrintString);
 	    		BasicBlockPrintfFormatStr = new GlobalVariable(*((BB.getParent())->getParent()), llvm::ArrayType::get(llvm::IntegerType::get(*Context, 8), strlen(finalPrintString)+1), true, llvm::GlobalValue::PrivateLinkage, format_const, "BasicBlockPrintfFormatStr");
 		
 				Constant *var_ref1 = ConstantExpr::getGetElementPtr(BasicBlockPrintfFormatStr, indices);
 				CallInst *call1 = builder.CreateCall2(printf_func, var_ref1, bbc);
 				call1->setTailCall(false);
+				title = "";
 
 
 			}
 
+			title = "\nEDGE PROFILING: \n";
 			for(eM::iterator i = edgeMap.begin(); i != edgeMap.end(); ++i) {
 
 				for (const_pred_iterator PI = pred_begin(i->first), E = pred_end(i->first); PI != E; ++PI) {
 	 				const BasicBlock *P = *PI;
-
-
-					std::string s = i->first->getName();
-					std::string p = P->getName();
-					p = p + "->" + s;
-					p.append(": %d\n");
-					const char *finalPrintString = p.c_str();
+					std::string curr = i->first->getName();
+					std::string prev = P->getName();
+					std::string total  = "b" + prev + " -> " + "b" + curr;
+					total.append(": %d\n");
+					title.append(total);
+					const char *finalPrintString = title.c_str();
 					Constant *format_const = ConstantDataArray::getString(*Context, finalPrintString);
 					BasicBlockPrintfFormatStr = new GlobalVariable(*((BB.getParent())->getParent()), llvm::ArrayType::get(llvm::IntegerType::get(*Context, 8), strlen(finalPrintString)+1), true, llvm::GlobalValue::PrivateLinkage, format_const, "BasicBlockPrintfFormatStr");
 					
-					int prev = stoi(p);
-					Value *Args[] = { builder.getInt32(0), builder.getInt32(prev)};
+					int prev_num = stoi(prev);
+					Value *Args[] = { builder.getInt32(0), builder.getInt32(prev_num)};
 					Value* v = builder.CreateInBoundsGEP(i->second, Args, "edges");
 					LoadInst *l = builder.CreateLoad(v);
 					Constant *var_ref2 = ConstantExpr::getGetElementPtr(BasicBlockPrintfFormatStr, indices);
 					CallInst *call1 = builder.CreateCall2(printf_func, var_ref2, l);
 					call1->setTailCall(false);
-
-				}
-				 
-
+					title = "";
+				}	
 			}
 
+			title = "\nLOOP PROFILING: \n";
+			for(eM::iterator i = edgeMap.begin(); i != edgeMap.end(); ++i) {
+
+				for (const_pred_iterator PI = pred_begin(i->first), E = pred_end(i->first); PI != E; ++PI) {
+	 				const BasicBlock *P = *PI;
+					std::string curr = i->first->getName();
+					std::string prev = P->getName();
+					std::pair<const BasicBlock*, const BasicBlock*> edge(P, i->first);
+					lM::iterator backedge = LoopMap.find(edge);
+					if(backedge != LoopMap.end()) {
+						std::string s;
+						for(auto& block: backedge->second) {
+	 						std::string n = block->getName();
+	 						std::string full = "b" + n + " ";
+	 					
+	 						s.append(full);
+						}
+						s.append(": %d\n");
+						title.append(s);
+
+						const char *finalPrintString = title.c_str();
+						Constant *format_const = ConstantDataArray::getString(*Context, finalPrintString);
+						BasicBlockPrintfFormatStr = new GlobalVariable(*((BB.getParent())->getParent()), llvm::ArrayType::get(llvm::IntegerType::get(*Context, 8), strlen(finalPrintString)+1), true, llvm::GlobalValue::PrivateLinkage, format_const, "BasicBlockPrintfFormatStr");
+						
+						int prev_num = stoi(prev);
+						Value *Args[] = { builder.getInt32(0), builder.getInt32(prev_num)};
+						Value* v = builder.CreateInBoundsGEP(i->second, Args, "loop");
+						LoadInst *l = builder.CreateLoad(v);
+						Constant *var_ref2 = ConstantExpr::getGetElementPtr(BasicBlockPrintfFormatStr, indices);
+						CallInst *call1 = builder.CreateCall2(printf_func, var_ref2, l);
+						call1->setTailCall(false);
+						title = "";
+					}
+				}	
+			}
 		}
 
 
@@ -258,10 +298,10 @@ void CS201Profiling::printSet(set s)
 {
 	for(set::iterator it = s.begin(); it!= s.end(); ++it)
 	{
-		errs() << "[" << it->first->getName() << "] => ";
+		errs() << "[b" << it->first->getName() << "] => ";
 		for(size_t j = 0; j < it->second.size(); ++j)
 		{
-			errs() << it->second.at(j)->getName() << ' ';
+			errs() << "b" << it->second.at(j)->getName() << ' ';
 		}
 		errs() << '\n';
 	}
@@ -373,7 +413,7 @@ void CS201Profiling::FindBackEdges(set& AllDomSets, std::vector<std::pair<const 
 	}
 	for(size_t i = 0; i < BackEdges.size(); ++i)
 	{
-		errs() << "Back Edge: " << BackEdges.at(i).first->getName() << "->" <<  BackEdges.at(i).second->getName() << "\n\n";
+		errs() << "Back Edge: " << "b" << BackEdges.at(i).first->getName() << " -> " <<  "b" << BackEdges.at(i).second->getName() << "\n\n";
 	}
 }
 
@@ -386,11 +426,12 @@ void CS201Profiling::Insert(const BasicBlock* node, std::vector<const BasicBlock
 		loop.push_back(node);
 		s.push(node);
 	}
+
 }
 
 void CS201Profiling::LoopConstruction(std::vector<std::pair<const BasicBlock*, const BasicBlock*>> &BackEdges, std::vector<std::vector<const BasicBlock*>> &LoopSet) {
 	
-	for(size_t i = 0; i < BackEdges.size(); ++i){
+	for(size_t i = 0; i < BackEdges.size(); ++i) {
 		std::stack<const BasicBlock*> s;
 		std::vector<const BasicBlock*> loop;
 		loop.push_back(BackEdges.at(i).second);
@@ -404,12 +445,14 @@ void CS201Profiling::LoopConstruction(std::vector<std::pair<const BasicBlock*, c
 	    		Insert(P, loop, s);
 	    	}
 		}
+		std::sort(loop.begin(), loop.end(), predCompare);
 		LoopSet.push_back(loop);
+		LoopMap[BackEdges.at(i)] = loop;
 	}
 	errs() << "Loops: \n";
 	for(size_t i = 0; i < LoopSet.size(); ++i) {
 		for(size_t j = 0; j < LoopSet.at(i).size(); ++j) 
-			errs() << LoopSet.at(i).at(j)->getName() << ' ';
+			errs() << "b" << LoopSet.at(i).at(j)->getName() << ' ';
 		errs() << '\n';
 	}
 	errs() << "\n\n";
