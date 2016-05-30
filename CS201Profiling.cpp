@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <stack>
+#include <iostream>
+#include <string>
 #include <stdlib.h>
  
 using namespace llvm;
@@ -24,8 +26,10 @@ public:
 };
 
 typedef std::map<const BasicBlock*, std::vector<const BasicBlock*>, compare> set;
-typedef std::map<std::pair<Value*, Value*>, GlobalVariable*> eM;
+typedef std::map<const BasicBlock*, GlobalVariable*, compare> eM;
+typedef std::map<int, BasicBlock*> ibM;
 typedef	std::map<const BasicBlock*, GlobalVariable*, compare> bbM;
+
 
 namespace {
 
@@ -48,9 +52,12 @@ namespace {
 		LLVMContext *Context;
 		bbM bbMap;
 		eM edgeMap;
+		ibM intMap;
 		GlobalVariable *bbCounter = nullptr;
-		GlobalVariable *prevBB = nullptr;
-		BasicBlock *prevBlock;
+		GlobalVariable *prevIndex = NULL;
+		ConstantInt *BBNum = nullptr;
+	
+
 
 
     	GlobalVariable *BasicBlockPrintfFormatStr = NULL;
@@ -71,18 +78,20 @@ namespace {
 
 		bool doInitialization(Module &M) {
 		errs() << "\n---------Starting BasicBlockDemo---------\n";
-		 
+		
 		errs() << "Module: " << M.getName() << "\n";
 		Context = &M.getContext();
 
-	  
+	  	BBNum = ConstantInt::get(Type::getInt32Ty(*Context), -1);
 	    bbCounter = new GlobalVariable(M, Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "bbCounter");
+	    prevIndex = new GlobalVariable(M, Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 9), "prevIndex");
+
 	    const char *finalPrintString = "BB Count: %d\n";
 	    Constant *format_const = ConstantDataArray::getString(*Context, finalPrintString);
 	    BasicBlockPrintfFormatStr = new GlobalVariable(M, llvm::ArrayType::get(llvm::IntegerType::get(*Context, 8), strlen(finalPrintString)+1), true, llvm::GlobalValue::PrivateLinkage, format_const, "BasicBlockPrintfFormatStr");
 	    printf_func = printf_prototype(*Context, &M);
  
- 		
+
 		for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
 			for (Function::iterator b = I->begin(), E = I->end(); b != E; ++b) {
 
@@ -95,30 +104,14 @@ namespace {
 				// Initialize bbMap
 				bbMap[BB] = new GlobalVariable(M, Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "bbMap");
 				
-
 				// Initialize edgeMap
-				IRBuilder<> IRB(BB->getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
-				int i;
-				BB->getName().getAsInteger(0, i);
-				Value * curr = IRB.getInt32(i);
-				for (succ_iterator I = succ_begin(BB), E = succ_end(BB); I != E; ++I) {
-	 				BasicBlock *S = *I;
-	 				IRBuilder<> IRB(S->getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
-					int j;
-					S->getName().getAsInteger(0, j);
-					Value * succ = IRB.getInt32(j);
-	 				std::pair<Value*, Value*> p(curr,succ);
-	 				edgeMap[p] = new GlobalVariable(M, Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "edgeMap");
-					
-					IRB.CreateStore(IRB.getInt32(0),edgeMap[p]);
-				}
+				ArrayType* array_t = ArrayType::get(Type::getInt32Ty(*Context),10);
+				edgeMap[BB] = new GlobalVariable(M, array_t, false, GlobalValue::ExternalLinkage, Constant::getNullValue(array_t), "edgeMap");
+		
+	    	}
 
-	    }
-
-		//	errs() << bbMap.size() << '\n';
 	
 		}
-		//errs() << bbMap.size() << '\n';
 
 
 		return true;
@@ -130,29 +123,14 @@ namespace {
 	
 		return false;
 		}
+
+
 		//----------------------------------
 		bool runOnFunction(Function &F) override {
 
 			errs() << "Function: " << F.getName() << '\n';
 			
-			// for(Function::iterator b = F.begin(); b!= F.end(); ++b) {
-			// 	BasicBlock * BB = b;
-			// 	IRBuilder<> IRB(BB->getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
-			// 	int i;
-			// 	BB->getName().getAsInteger(0, i);
-			// 	Value * curr = IRB.getInt32(i);
-			// 	for (succ_iterator I = succ_begin(BB), E = succ_end(BB); I != E; ++I) {
-		 // 				BasicBlock *S = *I;
-		 // 				IRBuilder<> IRB(S->getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
-			// 			int j;
-			// 			S->getName().getAsInteger(0, j);
-			// 			Value * succ = IRB.getInt32(j);
-		 // 				std::pair<Value*, Value*> p(curr,succ);
-		 // 				edgeMap[p] = new GlobalVariable(*F.getParent(), Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "edgeMap");
-						
-			// 			IRB.CreateStore(IRB.getInt32(0),edgeMap[p]);
-			// 	 }
-			// }
+			
 			// Output predecessors
 			set PredSet, AllDomSets;
 			std::vector<std::pair<const BasicBlock*, const BasicBlock*>> BackEdges;
@@ -163,89 +141,62 @@ namespace {
 			FindBackEdges(AllDomSets, BackEdges);
 			LoopConstruction(BackEdges, LoopSet);
 			
-
+			
 			for(auto &BB: F) {
 				// Add the footer to Main's BB containing the return 0; statement BEFORE calling runOnBasicBlock
 				if(F.getName().equals("main") && isa<ReturnInst>(BB.getTerminator())) { // major hack?
-					addFinalPrintf(BB, Context, bbMap, bbCounter, BasicBlockPrintfFormatStr, printf_func);
+					addFinalPrintf(BB, Context, bbMap, edgeMap, bbCounter, BasicBlockPrintfFormatStr, printf_func);
 				}
 
 					runOnBasicBlock(BB);
 			}
 
-			return true;
+			return true;	
 		}
 
 		    //----------------------------------
 		bool runOnBasicBlock(BasicBlock &BB) {
 
 			IRBuilder<> IRB(BB.getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
+			IRBuilder<> IRB2(BB.getFirstInsertionPt()); // Will insert the generated instructions BEFORE the first BB instruction
 
 			Value *loadAddr = IRB.CreateLoad(bbMap[&BB]);
 			Value *addAddr = IRB.CreateAdd(ConstantInt::get(Type::getInt32Ty(*Context), 1), loadAddr);
 			IRB.CreateStore(addAddr, bbMap[&BB]);
 
-			// int j;
-			// BB.getName().getAsInteger(0, j);
-			// Value* currBB = new GlobalVariable(*((BB.getParent())->getParent()), Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "currBB");	
-			// IRB.CreateStore(IRB.getInt32(j), currBB);
-			// Value *loadCurrBB = IRB.CreateLoad(currBB);
-			// loadCurrBB->setName("loadCurrBB");
-			// errs() <<" CURR NAME: " << loadCurrBB->getName() << '\n';
-			// // Load Prev
-			// //Value *pBB = IRB.CreateLoad(prevBB);
-			// if(!prevBB) {
-			// 	prevBB = new GlobalVariable(*((BB.getParent())->getParent()), Type::getInt32Ty(*Context), false, GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(*Context), 0), "prevBB");
-			// 	IRB.CreateStore(loadCurrBB, prevBB);
-			// 	errs() <<"CURR: " << loadCurrBB->getName() << '\n' << "PREV: " << prevBB->getName() << '\n';
-			// 	return true;
-			// }
-			//currBB->print(errs()); errs() << '\n';
-			//prevBB->print(errs()); errs() << '\n';
-			// std::pair<Value*, Value*> p(prevBB, currBB);
-			// if (edgeMap[p]) {
-			// }
-			// // for(auto&I:BB)
-			// // 	errs() << I << '\n';
-
-			//IRB.CreateLoad(edgeMap[p]);
-			//IRB.CreateStore()
-			// Store Curr into Prev
-
-			// Load Curr into new value object
-			//GlobalVariable * currBB;
-
-	//IRB.CreateStore(s,prevBB);
+			int cBBNum = std::stoi(BB.getName());
 			
+			prevIndex->print(errs()); errs() << '\n';
+			Value* loadAddr1 = IRB2.CreateLoad(prevIndex);
+			loadAddr1->print(errs()); errs() << '\n';
+			Value *Args[] = { IRB2.getInt32(0), loadAddr1};
+			Value* v = IRB2.CreateInBoundsGEP(edgeMap[&BB], Args, "edges");
+			v->print(errs()); errs() << '\n';
 
-			//IRB.CreateStore(s, prevBlock);
-
-			// int i;
-			// BB.getName().getAsInteger(0, i);
-			// //errs() << i << '\n';			
-
-			// if(prevBlock->hasName()) {
-			// 	std::pair<const BasicBlock*, const BasicBlock*> edge(prevBlock, BB);
-			// 	// Value *loadAddr1 = IRB.CreateLoad(edgeMap[edge]);
-			// 	// Value *addAddr1 = IRB.CreateAdd(ConstantInt::get(Type::getInt32Ty(*Context), 1), loadAddr1);
-			// 	// IRB.CreateStore(addAddr1, edgeMap[edge]);
-			// }
+			LoadInst *l = IRB2.CreateLoad(v);
+			l->print(errs()); errs() << '\n';
+		 	Value* addAddr1 = IRB2.CreateAdd(ConstantInt::get(Type::getInt32Ty(*Context), 1), l);
+		 	addAddr1->print(errs()); errs() << '\n';
+		 	StoreInst *s = IRB2.CreateStore(addAddr1, v);
+		 	s->print(errs()); errs() << '\n';
 
 
-      		
+		 	StoreInst *s1 = IRB2.CreateStore(ConstantInt::get(Type::getInt32Ty(*Context), cBBNum), prevIndex);
+		 	s1->print(errs()); errs() << '\n';
+		
 
 			return true;
 		}
 
 
-		void addFinalPrintf(BasicBlock& BB, LLVMContext *Context, bbM &bbMap,  GlobalVariable *bbCounter, GlobalVariable *var, Function *printf_func) {
+		void addFinalPrintf(BasicBlock& BB, LLVMContext *Context, bbM &bbMap,  eM &edgeMap, GlobalVariable *bbCounter, GlobalVariable *var,  Function *printf_func) {
 			IRBuilder<> builder(BB.getTerminator()); // Insert BEFORE the final statement
 			std::vector<Constant*> indices;
 			Constant *zero = Constant::getNullValue(IntegerType::getInt32Ty(*Context));
 			indices.push_back(zero);
 			indices.push_back(zero);
 			Constant *var_ref = ConstantExpr::getGetElementPtr(var, indices);
-
+	
 			for(bbM::iterator i = bbMap.begin(); i != bbMap.end(); ++i) {
 
 				Value *bbc = builder.CreateLoad(i->second);
@@ -262,10 +213,33 @@ namespace {
 
 
 			}
-			// Value *bb = builder.CreateLoad(bbCounter);
-   //   		CallInst *call1 = builder.CreateCall2(printf_func, var_ref, bb);
-   //    		call1->setTailCall(false);
-			
+
+			for(eM::iterator i = edgeMap.begin(); i != edgeMap.end(); ++i) {
+
+				for (const_pred_iterator PI = pred_begin(i->first), E = pred_end(i->first); PI != E; ++PI) {
+	 				const BasicBlock *P = *PI;
+
+
+					std::string s = i->first->getName();
+					std::string p = P->getName();
+					p = p + "->" + s;
+					p.append(": %d\n");
+					const char *finalPrintString = p.c_str();
+					Constant *format_const = ConstantDataArray::getString(*Context, finalPrintString);
+					BasicBlockPrintfFormatStr = new GlobalVariable(*((BB.getParent())->getParent()), llvm::ArrayType::get(llvm::IntegerType::get(*Context, 8), strlen(finalPrintString)+1), true, llvm::GlobalValue::PrivateLinkage, format_const, "BasicBlockPrintfFormatStr");
+					
+					int prev = stoi(p);
+					Value *Args[] = { builder.getInt32(0), builder.getInt32(prev)};
+					Value* v = builder.CreateInBoundsGEP(i->second, Args, "edges");
+					LoadInst *l = builder.CreateLoad(v);
+					Constant *var_ref2 = ConstantExpr::getGetElementPtr(BasicBlockPrintfFormatStr, indices);
+					CallInst *call1 = builder.CreateCall2(printf_func, var_ref2, l);
+					call1->setTailCall(false);
+
+				}
+				 
+
+			}
 
 		}
 
